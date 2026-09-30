@@ -7,7 +7,9 @@
   "license": "MIT",
   "scripts": {
     "build": "node scripts/build.mjs",
-    "dev": "node scripts/dev.mjs"
+    "dev": "node scripts/dev.mjs",
+    "measure": "node scripts/measure.mjs",
+    "measure:selftest": "node scripts/measure-selftest.mjs"
   },
   "engines": {
     "node": ">=20"
