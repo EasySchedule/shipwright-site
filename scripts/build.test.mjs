@@ -539,8 +539,13 @@ test('the guard fires on the same-line positions and nowhere else', () => {
  * never one -- that line has no closing `/` at all. The chained form is the one
  * that was reported, and it was reported correctly as a false positive.
  *
- * What tells them apart is the token after the run. A division can be followed by
- * the next operand of its chain; a pattern cannot.
+ * What tells them apart is the token after the run, and the test has to be phrased
+ * the other way round from the obvious one. It is tempting to say that a division
+ * can be followed by the next operand of its chain and a pattern cannot, but a
+ * pattern *can* be followed by a call, a subscript, an operator or a template tag:
+ * `/re/(s)`, `/re/[0]` and `` /re/`t` `` are all ordinary JavaScript. The token that
+ * settles it is one that cannot follow a pattern at all, because then the pattern
+ * reading is two adjacent expressions. `3` is one. See CANNOT_FOLLOW_PATTERN.
  */
 test('chained division is not reported, and neither is a single division', () => {
   const clean = [
@@ -642,4 +647,57 @@ test('end to end: the build still succeeds when a division wraps to the next lin
   const output = `${result.stdout}${result.stderr}`;
   assert.equal(result.status, 0, `a wrapped division must not fail the build:\n${output}`);
   assert.match(result.stdout, /config\.js written/);
+});
+
+/*
+ * The guard has to stay on when the next token can legally follow a pattern.
+ *
+ * The chained-division fix skipped a run whose next token looked like the start of
+ * an operand, on the argument that a division can be followed by the next operand
+ * of its chain and a pattern cannot. The first half is true. The second is not:
+ * `/re/(s)`, `/re/[0]`, `/re/+1`, `/re/-1` and ``/re/`t` `` are ordinary JavaScript,
+ * so `(`, `[`, `+`, `-` and a backtick all follow a complete regex literal.
+ *
+ * Reading those as operands therefore silenced the guard in the one position it
+ * exists to protect, and did so silently -- the build exited 0 and published an
+ * artifact that disagreed with the source. This is the same class of defect as the
+ * one SHI-64 was filed for, pointing the other way, and it is the reason the test
+ * is one-sided: only a token that cannot follow a pattern is skipped.
+ */
+test('the guard fires when the next token can follow a complete pattern', () => {
+  const caught = [
+    ['a call', 'if (x) / a - b /(s);'],
+    ['a subscript', 'if (x) / a - b /[0];'],
+    ['a unary sign on an identifier', 'if (x) / a - b / + g;'],
+    ['a unary sign on a number', 'if (x) / a - b / - 1;'],
+    ['a template tag', 'if (x) / a - b /`t`;'],
+    // Not in the five above, but the same argument: `!` and `~` are operators, so
+    // `!/ a b /.test(s)` is a pattern position too.
+    ['logical not', 'if (x) / a - b /!g;'],
+    ['bitwise not', 'if (x) / a - b /~g;'],
+  ];
+  for (const [name, source] of caught) {
+    assert.deepEqual(
+      findUnmangleableRuns(source),
+      ['/ a - b /'],
+      `${name}: the guard was silenced on a run that is still a pattern`,
+    );
+    assert.ok(
+      !minifyJs(source).includes('/ a - b /'),
+      `${name}: the guard is refusing a run the minifier copies verbatim`,
+    );
+  }
+});
+
+test('end to end: the build refuses a pattern followed by a unary sign', () => {
+  // The source is the shape that reached dist/: `+` made the guard read `/ a - b /`
+  // as arithmetic, the build exited 0, and the published artifact evaluated to the
+  // opposite of the source. Only the build's own refusal stands between that and
+  // the page, so it is asserted through the real build.mjs.
+  const result = runBuildInTempTree(
+    'let hit = false;\nfunction label(row) { return row.kind; }\n' +
+      'if (label({ kind: 1 })) / a - b / + 1 !== "/ a - b /1" && (hit = true);\n' +
+      'if (hit) throw new Error("the published artifact would disagree with the source");\n',
+  );
+  assertGuardRefused(result, '/ a - b /');
 });

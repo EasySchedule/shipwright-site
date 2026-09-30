@@ -91,14 +91,24 @@ function isIdentifierChar(ch) {
   return ch !== undefined && WORD.test(ch);
 }
 
-// Characters that can start the next operand of a division: an identifier, a
-// number, `$`, a grouping paren, an array or object literal, a string, a
-// template, or a unary sign.
+// Tokens that cannot follow a complete regex literal: the start of an
+// identifier or a number, `$`, or a string.
 //
-// `!` and `~` are deliberately absent. `!/ a b /.test(s)` is a real pattern
-// position, so reading `!` as the start of an operand would hide the very thing
-// this file exists to catch.
-const OPERAND_START = /[A-Za-z0-9_$([{'"`+-]/;
+// A run followed by one of these is provably arithmetic, because the pattern
+// reading would be two adjacent expressions, which is a syntax error:
+//
+//   const n = f(x) / 2 / 3;
+//                    ^^^^  the run closes here, and `3` follows it
+//
+// The test is deliberately one-sided. Everything else -- `(`, `[`, `{`, a
+// template, any operator -- *can* follow a pattern, because `/re/(s)`, `/re/[0]`
+// and a template tag are all ordinary JavaScript. Those leave both readings real
+// and this guard has to stay on, since it is the only thing between the run and
+// dist/. An unrecognised token is read as "can follow a pattern", which is the
+// safe direction: the guard fires on correct code, which is a red build with a
+// message, instead of staying quiet on a mangled pattern, which is a wrong
+// number on the page.
+const CANNOT_FOLLOW_PATTERN = /[A-Za-z0-9_$'\"]/;
 
 /**
  * Minify first-party JavaScript by removing comments and unnecessary
@@ -443,19 +453,15 @@ export function findUnmangleableRuns(source) {
     while (j < n && /[a-z]/.test(source[j])) j += 1;
     const run = source.slice(i, j);
 
-    // If the next token can start an operand, this is not one whole pattern but
-    // the first half of `left / b / c`, and there is nothing in it to mangle:
-    //
-    //   const n = f(x) / 2 / 3;
-    //                    ^^^^  the run closes here, and `3` follows it
-    //
-    // `/ 2 /` is a legal pattern and `f(x) / 2 / 3` is legal division, so every
-    // other test below passes on it, and the guard used to report ordinary
-    // arithmetic as a mangled pattern. A division can be followed by the next
-    // operand of its chain; a pattern cannot.
+    // If the next token cannot follow a complete pattern, this is not one whole
+    // pattern but the first half of `left / b / c`, and there is nothing in it
+    // to mangle. `/ 2 /` is a legal pattern and `f(x) / 2 / 3` is legal division,
+    // so every other test below passes on it, and the guard used to report
+    // ordinary arithmetic as a mangled pattern. See CANNOT_FOLLOW_PATTERN for
+    // why the test runs the other way round, and for why that direction matters.
     let after = j;
     while (after < n && (source[after] === ' ' || source[after] === '\t')) after += 1;
-    if (after < n && OPERAND_START.test(source[after])) continue;
+    if (after < n && CANNOT_FOLLOW_PATTERN.test(source[after])) continue;
 
     // A run containing code punctuation is an expression, not a pattern.
     if (CODE_PUNCTUATION.test(run)) continue;
