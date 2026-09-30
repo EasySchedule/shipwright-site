@@ -1,7 +1,3 @@
-<<<<<<< HEAD
-# shipwright-site
-Shipwright: the oh-my-pi latency leaderboard. A static page reading public.optimizations from Supabase over the anon key under RLS. No framework, no bundler, no runtime dependencies.
-=======
 # Shipwright site
 
 The public Shipwright page: a measured optimization leaderboard for
@@ -79,4 +75,3 @@ needed and must not be set.
 ## License
 
 MIT. See [LICENSE](LICENSE).
->>>>>>> 67b151e (feat: add the build skeleton for the Shipwright public site)
