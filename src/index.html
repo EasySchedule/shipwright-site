@@ -3,28 +3,75 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Shipwright</title>
+    <title>Shipwright — oh-my-pi latency leaderboard</title>
     <meta
       name="description"
-      content="Shipwright: a measured optimization leaderboard for oh-my-pi."
+      content="Every measured change to oh-my-pi's speed, ranked by how much it improved. Everything else on this board is still being measured."
     />
+    <link rel="canonical" href="https://shipwright-spr3.netlify.app" />
+    <meta property="og:title" content="Shipwright — oh-my-pi latency leaderboard" />
+    <meta
+      property="og:description"
+      content="Every measured change to oh-my-pi's speed, ranked by how much it improved. Everything else on this board is still being measured."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://shipwright-spr3.netlify.app" />
+    <meta property="og:image" content="https://shipwright-spr3.netlify.app/og.png" />
+    <meta property="og:image:type" content="image/png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta name="twitter:card" content="summary" />
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
-    <main>
-      <h1>Shipwright</h1>
-      <p class="lede">
-        A surface publishes no number until a measurement carries its commit,
-        its measuring command and its date.
-      </p>
-      <p id="status" class="status" role="status">Checking build configuration&hellip;</p>
-      <p class="note">
-        The leaderboard reads from Supabase under row level security. This
-        placeholder page proves the build pipeline only; it shows no
-        measurements.
-      </p>
-    </main>
+    <div class="page">
+      <!-- 1. Masthead. Static HTML: legible with no network and no script. -->
+      <header class="masthead">
+        <p class="wordmark">Shipwright</p>
+        <h1>oh-my-pi latency leaderboard</h1>
+        <!-- Copy the spec fixes verbatim and keeps each string on one source
+             line, so its textContent compares exactly rather than relying on
+             whitespace collapsing to tidy it up. -->
+        <p class="standfirst">Every measured change to oh-my-pi's speed, ranked by how much it improved. Everything else on this board is still being measured.</p>
+      </header>
+
+      <!-- 2. Status line. The one element that changes between states. -->
+      <p id="status" class="status" role="status" aria-live="polite">Loading the board.</p>
+
+      <!-- 3. Board note. Why the board is thin, before the rows rather than after. -->
+      <p id="board-note" class="board-note">A number appears on this board only when it carries a commit and a measurement you can rerun.</p>
+
+      <!-- 4. The board. Populated by src/main.js; starts as three skeletons.
+           The skeletons are written without any whitespace between their bars,
+           so a skeleton holds no text node at all, not even a blank one. -->
+      <div id="board" class="board" aria-busy="true">
+        <div class="skeleton" aria-hidden="true"><span class="sk sk-name"></span><span class="sk sk-line"></span></div>
+        <div class="skeleton" aria-hidden="true"><span class="sk sk-name"></span><span class="sk sk-line"></span></div>
+        <div class="skeleton" aria-hidden="true"><span class="sk sk-name"></span><span class="sk sk-line"></span></div>
+      </div>
+
+      <!-- 5. Method. Below the fold: the answer first, the explanation on request. -->
+      <section class="method" aria-labelledby="method-heading">
+        <h2 id="method-heading">How we measure</h2>
+        <p>A result appears on this board only when it carries all five of these: the commit that made the change, the command that measured it, the metric and the unit it was measured in, the date it was measured, and who measured it.</p>
+        <p>A change missing any one of those stays in Still measuring. It is never given a number, and it is never given a zero.</p>
+        <p>A zero appears here only when zero is the proven result.</p>
+        <p>This page reads the board from our database every time you open it. It does not cache, so a missing number means the measurement has not landed yet.</p>
+      </section>
+
+      <noscript>
+        <p class="noscript-note">This board reads its numbers from our database in your browser, so it needs JavaScript to show them. How we measure is below.</p>
+      </noscript>
+
+      <!-- 6. Footer. -->
+      <footer class="footer">Shipwright · oh-my-pi latency leaderboard</footer>
+    </div>
+
+    <!--
+      config.js is a classic script, so it has finished executing before the
+      module below starts, and it runs before any network request is made.
+    -->
     <script src="./config.js"></script>
-    <script type="module" src="./app.js"></script>
+    <script type="module" src="./main.js"></script>
   </body>
 </html>
