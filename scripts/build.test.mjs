@@ -5,7 +5,7 @@
 
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -62,8 +62,13 @@ function runBuild(env) {
  * `source` is written to src/probe.js. Pass undefined to run with an empty src/,
  * which the build refuses for its own reason. Returns spawnSync's result, so a
  * case can assert on the exit code and on the text the build printed.
+ *
+ * `onDist`, if given, is handed the contents of the dist/probe.js the run
+ * produced, or undefined if there is none -- the build refuses before writing,
+ * so a refusal leaves no dist/ to read. That is how a case checks what was
+ * published and not only what was printed.
  */
-function runBuildInTempTree(source) {
+function runBuildInTempTree(source, onDist) {
   const dir = mkdtempSync(join(tmpdir(), 'shipwright-build-'));
   try {
     mkdirSync(join(dir, 'scripts'));
@@ -72,7 +77,7 @@ function runBuildInTempTree(source) {
     // now rather than a snapshot taken when this file was written.
     copyFileSync(BUILD, join(dir, 'scripts/build.mjs'));
     if (source !== undefined) writeFileSync(join(dir, 'src/probe.js'), source, 'utf8');
-    return spawnSync(process.execPath, [join(dir, 'scripts/build.mjs')], {
+    const result = spawnSync(process.execPath, [join(dir, 'scripts/build.mjs')], {
       cwd: dir,
       encoding: 'utf8',
       env: {
@@ -81,6 +86,16 @@ function runBuildInTempTree(source) {
         SUPABASE_ANON_KEY: KEY_VALUE,
       },
     });
+    if (onDist !== undefined) {
+      let published;
+      try {
+        published = readFileSync(join(dir, 'dist/probe.js'), 'utf8');
+      } catch {
+        published = undefined;
+      }
+      onDist(published);
+    }
+    return result;
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -401,4 +416,288 @@ test('end to end: an empty src/ is refused, so a temp-tree refusal names the gua
     !result.stderr.includes('the minifier would mangle'),
     `guard message on a source the guard never read: ${result.stderr}`,
   );
+});
+
+
+/*
+ * A `/` in first position on a line. (SHI-64)
+ *
+ * Every case above puts the ambiguous `/` on the same line as the `)`, `]` or `}`
+ * before it, which is the position the guard was written for. The position that
+ * actually reached dist/ was the other one. `findUnmangleableRuns` walked back
+ * over spaces and tabs to find the closer and stopped at the newline, so it
+ * skipped every run whose closer was on the previous line -- which is the
+ * ordinary way to write the statement after a block:
+ *
+ *   function probe() {}
+ *   / foo - bar /.test("foo-bar") && (hit = 1);
+ *
+ * Nothing stood between that and the page. The build exited 0 and published
+ * `/foo-bar/`, a pattern that matches where the source's did not, and the
+ * published artifact is the one a browser loads.
+ *
+ * The minifier now copies a line-leading run byte for byte instead of guessing
+ * whether it is a pattern or a division, because there is nothing to decide:
+ * whitespace inside a pattern is significant and copying it preserves the
+ * match, and whitespace inside a division is not significant at all. These are
+ * the runs that must come out unchanged.
+ */
+test('a pattern in first position on a line is copied byte for byte', () => {
+  // Both of these are complete programs, so both are evaluated as well as
+  // compared byte for byte. A pattern can keep matching what it matched while
+  // its source has been rewritten, and a rewritten pattern is what ships.
+  const programs = [
+    ['after )', 'let hit = 0;\nif (1)\n/ foo - bar /.test("foo-bar") && (hit = 1);\nreturn hit;'],
+    ['after }', 'let hit = 0;\nfunction probe() {}\n/ foo - bar /.test("foo-bar") && (hit = 1);\nreturn hit;'],
+  ];
+  for (const [name, source] of programs) {
+    const minified = minifyJs(source);
+    assert.ok(
+      minified.includes('/ foo - bar /'),
+      `${name}: the run was rewritten -> ${JSON.stringify(minified)}`,
+    );
+    assert.equal(new Function(source)(), 0, `${name}: the source does not match`);
+    assert.equal(new Function(minified)(), 0, `${name}: the minified output wrongly matches`);
+  }
+
+  // After `]` the same source is not a legal program: `[1]` can be divided, so
+  // the parser takes that `/` as an operator and then trips on the `.`. The
+  // minifier does not know that -- it decides from the run alone -- so this one
+  // is asserted on the output bytes only. Which is the level the bug arrived at
+  // anyway: the build parses what it just wrote, and a mangled pattern parses
+  // either way.
+  const afterBracket = minifyJs('const a = [1]\n/ foo - bar /.test("foo-bar");');
+  assert.ok(
+    afterBracket.includes('/ foo - bar /'),
+    `after ]: the run was rewritten -> ${JSON.stringify(afterBracket)}`,
+  );
+});
+
+/*
+ * The guard still has to fire -- and it still has to be quiet where there is
+ * nothing wrong.
+ *
+ * Reading a line-leading `/` correctly is the minifier getting better at
+ * guessing, not the guard becoming redundant. On the same line as its closer the
+ * guess is still a guess, `lastChar` is `)` or `]` or `}`, and none of those can
+ * tell a pattern from a division, so the guard is what stands between those
+ * three and dist/. A change that quietly stopped it would leave the original
+ * corruption in place while looking like a fix.
+ *
+ * The line-leading positions are the other direction. Nothing mangles them, so
+ * the guard must stay off them: refusing them would be refusing correct code
+ * that minifies correctly, and a build that stops for that is its own outage.
+ */
+test('the guard fires on the same-line positions and nowhere else', () => {
+  const caught = [
+    ['after )', 'if (x) / a . b /.test(s);'],
+    ['after ]', 'const v = a[0] / a . b /.test(s);'],
+    ['after }', 'function probe() {} / a . b /.test(s);'],
+  ];
+  for (const [name, source] of caught) {
+    assert.deepEqual(
+      findUnmangleableRuns(source),
+      ['/ a . b /'],
+      `${name}: the guard stopped firing`,
+    );
+    // The guard refuses a run because the minifier would change it, so that has
+    // to still be true -- otherwise this would be refusing correct code.
+    assert.ok(
+      !minifyJs(source).includes('/ a . b /'),
+      `${name}: the guard is refusing a run the minifier copies verbatim`,
+    );
+  }
+
+  // And the line-leading positions, which the minifier copies verbatim, are
+  // reported by neither. These are the ones that used to reach dist/ unchecked.
+  const lineLeading = [
+    'if (1)\n/ foo - bar /.test(s);',
+    'const a = [1]\n/ foo - bar /.test(s);',
+    'function probe() {}\n/ foo - bar /.test(s);',
+  ];
+  for (const source of lineLeading) {
+    assert.deepEqual(
+      findUnmangleableRuns(source),
+      [],
+      `the guard fired on a run the minifier copies verbatim: ${JSON.stringify(source)}`,
+    );
+  }
+});
+
+/*
+ * Chained division is not a pattern. (SHI-64)
+ *
+ * The guard only ever meant to fire on something the minifier would mangle. It
+ * also fired on arithmetic, because it looked at the run and nothing else:
+ *
+ *   const n = f(x) / 2 / 3;
+ *                    ^^^^  the run closes here, and `3` follows it
+ *
+ * `/ 2 /` is a legal pattern and `f(x) / 2 / 3` is legal division, so every other
+ * test the guard applies passes on it. That is a red build waiting for ordinary
+ * code. The report called `const half = (a + b) / 2;` the false positive; it was
+ * never one -- that line has no closing `/` at all. The chained form is the one
+ * that was reported, and it was reported correctly as a false positive.
+ *
+ * What tells them apart is the token after the run, and the test has to be phrased
+ * the other way round from the obvious one. It is tempting to say that a division
+ * can be followed by the next operand of its chain and a pattern cannot, but a
+ * pattern *can* be followed by a call, a subscript, an operator or a template tag:
+ * `/re/(s)`, `/re/[0]` and `` /re/`t` `` are all ordinary JavaScript. The token that
+ * settles it is one that cannot follow a pattern at all, because then the pattern
+ * reading is two adjacent expressions. `3` is one. See CANNOT_FOLLOW_PATTERN.
+ */
+test('chained division is not reported, and neither is a single division', () => {
+  const clean = [
+    'const n = f(x) / 2 / 3;',
+    'const n = f(x) / 2;',
+    'const half = (a + b) / 2;',
+    'const q = total / count;',
+    'const v = a[0] / b / c / d;',
+    // The same chain wrapped onto the next line, which reads exactly like the
+    // line-leading patterns above.
+    'const n = f(x)\n  / 2 / 3;',
+    'const n = f(x)\n  / 2;',
+  ];
+  for (const source of clean) {
+    assert.deepEqual(
+      findUnmangleableRuns(source),
+      [],
+      `unexpected offender in: ${JSON.stringify(source)}`,
+    );
+  }
+});
+
+/*
+ * A division that continues onto the next line has to stay a division.
+ *
+ * This is the regression risk of the fix above, so it is pinned deliberately. A
+ * line-leading `/` is not the same thing as a completed statement: ASI inserts a
+ * semicolon only when the next token cannot continue the statement, and a `/`
+ * usually can. The restricted production after `return` bans a line terminator
+ * before the expression starts, not one inside it, so this is a division:
+ *
+ *   return (a)
+ *     / 2 / 3;              // a / 2 / 3
+ *
+ * A minifier that read every line-leading `/` as a pattern would take `/ 2 /` for
+ * a literal here, and the page would divide by nothing.
+ */
+test('a division that continues onto the next line still divides', () => {
+  const cases = [
+    [
+      'a wrapped sum divided by a literal',
+      'function f(a, b) {\n  const v = (a + b)\n    / 2;\n  return v;\n}\nreturn f(3, 4);',
+      3.5,
+    ],
+    [
+      'a wrapped chain divided twice',
+      'function f(a) {\n  return (a)\n    / 2 / 3;\n}\nreturn f(12);',
+      2,
+    ],
+  ];
+  for (const [name, source, want] of cases) {
+    const minified = minifyJs(source);
+    assert.equal(new Function(source)(), want, `${name}: the source does not divide`);
+    assert.equal(
+      new Function(minified)(),
+      want,
+      `${name}: the minified output no longer divides -> ${JSON.stringify(minified)}`,
+    );
+  }
+});
+
+/*
+ * The same fix, through the real build, and against the exact bytes that shipped.
+ *
+ * The build now exits 0 on this source -- it is correct code, so it must -- and
+ * what has to be checked is the artifact rather than the exit code, because the
+ * SHI-64 report was exactly this: exit 0, a dist/ that built, and a pattern in
+ * it that matched where the source's did not.
+ */
+test('end to end: a line-leading pattern is published with its whitespace intact', () => {
+  let published;
+  const result = runBuildInTempTree(
+    'let hit = 0;\nfunction probe() { return 1; }\n' +
+      '/ foo - bar /.test("foo-bar") && (hit = 1);\n' +
+      'if (hit !== 0) throw new Error("the pattern was rewritten");\n',
+    (text) => { published = text; },
+  );
+  const output = `${result.stdout}${result.stderr}`;
+  assert.equal(result.status, 0, `correct source must build:\n${output}`);
+  assert.match(result.stdout, /config\.js written/);
+  assert.ok(published !== undefined, 'the build published no dist/probe.js');
+  assert.ok(
+    published.includes('/ foo - bar /'),
+    `the published pattern was rewritten -> ${JSON.stringify(published)}`,
+  );
+  assert.ok(
+    !published.includes('/foo-bar/'),
+    `the published pattern lost its whitespace -> ${JSON.stringify(published)}`,
+  );
+});
+
+test('end to end: the build still succeeds when a division wraps to the next line', () => {
+  const result = runBuildInTempTree(
+    'function half(a, b) {\n  const v = (a + b)\n    / 2;\n  return v;\n}\n' +
+      'const third = (12)\n  / 2 / 3;\n' +
+      'if (half(3, 4) !== 3.5) throw new Error("wrapped division broke");\n' +
+      'if (third !== 2) throw new Error("wrapped chain broke");\n',
+  );
+  const output = `${result.stdout}${result.stderr}`;
+  assert.equal(result.status, 0, `a wrapped division must not fail the build:\n${output}`);
+  assert.match(result.stdout, /config\.js written/);
+});
+
+/*
+ * The guard has to stay on when the next token can legally follow a pattern.
+ *
+ * The chained-division fix skipped a run whose next token looked like the start of
+ * an operand, on the argument that a division can be followed by the next operand
+ * of its chain and a pattern cannot. The first half is true. The second is not:
+ * `/re/(s)`, `/re/[0]`, `/re/+1`, `/re/-1` and ``/re/`t` `` are ordinary JavaScript,
+ * so `(`, `[`, `+`, `-` and a backtick all follow a complete regex literal.
+ *
+ * Reading those as operands therefore silenced the guard in the one position it
+ * exists to protect, and did so silently -- the build exited 0 and published an
+ * artifact that disagreed with the source. This is the same class of defect as the
+ * one SHI-64 was filed for, pointing the other way, and it is the reason the test
+ * is one-sided: only a token that cannot follow a pattern is skipped.
+ */
+test('the guard fires when the next token can follow a complete pattern', () => {
+  const caught = [
+    ['a call', 'if (x) / a - b /(s);'],
+    ['a subscript', 'if (x) / a - b /[0];'],
+    ['a unary sign on an identifier', 'if (x) / a - b / + g;'],
+    ['a unary sign on a number', 'if (x) / a - b / - 1;'],
+    ['a template tag', 'if (x) / a - b /`t`;'],
+    // Not in the five above, but the same argument: `!` and `~` are operators, so
+    // `!/ a b /.test(s)` is a pattern position too.
+    ['logical not', 'if (x) / a - b /!g;'],
+    ['bitwise not', 'if (x) / a - b /~g;'],
+  ];
+  for (const [name, source] of caught) {
+    assert.deepEqual(
+      findUnmangleableRuns(source),
+      ['/ a - b /'],
+      `${name}: the guard was silenced on a run that is still a pattern`,
+    );
+    assert.ok(
+      !minifyJs(source).includes('/ a - b /'),
+      `${name}: the guard is refusing a run the minifier copies verbatim`,
+    );
+  }
+});
+
+test('end to end: the build refuses a pattern followed by a unary sign', () => {
+  // The source is the shape that reached dist/: `+` made the guard read `/ a - b /`
+  // as arithmetic, the build exited 0, and the published artifact evaluated to the
+  // opposite of the source. Only the build's own refusal stands between that and
+  // the page, so it is asserted through the real build.mjs.
+  const result = runBuildInTempTree(
+    'let hit = false;\nfunction label(row) { return row.kind; }\n' +
+      'if (label({ kind: 1 })) / a - b / + 1 !== "/ a - b /1" && (hit = true);\n' +
+      'if (hit) throw new Error("the published artifact would disagree with the source");\n',
+  );
+  assertGuardRefused(result, '/ a - b /');
 });
