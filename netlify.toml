@@ -14,9 +14,38 @@
 
 # Plain static headers. The page loads no third-party code, so the policy is
 # strict on purpose.
+#
+# `no-cache` on the catch-all is not a downgrade. Netlify already serves
+# unhashed static files as `max-age=0, must-revalidate`, so this states the
+# policy the site already had instead of leaving it to a default, and it makes
+# the page's own promise -- "It does not cache", so a missing number means the
+# measurement has not landed yet -- something the response headers enforce
+# rather than something only a client-side fetch option asserts.
 [[headers]]
   for = "/*"
   [headers.values]
     X-Content-Type-Options = "nosniff"
     Referrer-Policy = "strict-origin-when-cross-origin"
     X-Frame-Options = "DENY"
+    Cache-Control = "no-cache"
+
+# `/config.js` is the exception, and it is the reason this rule exists.
+#
+# The page loads it as a classic script from a URL that never changes between
+# deploys, and it carries the Supabase anon (publishable) key. That key is not
+# a secret -- it is meant to be readable by any browser and is constrained by
+# RLS -- so caching it is not a breach. It is a rotation problem: it is the one
+# file whose URL is identical across every deploy, so a warm cache or an edge
+# caught mid-revalidation can keep presenting the previous key. That is a
+# confusing 401-shaped failure at exactly the moment someone rotates a
+# credential, and self-inflicted.
+#
+# `no-store` is the blunt end of the board's two options and the correct one at
+# this size: the file is a few hundred bytes, it is read once per page view,
+# and there is nothing to win by holding it. Netlify merges matching header
+# blocks rather than replacing them, so the three security headers above still
+# apply here -- this rule only decides `Cache-Control`.
+[[headers]]
+  for = "/config.js"
+  [headers.values]
+    Cache-Control = "no-store"
