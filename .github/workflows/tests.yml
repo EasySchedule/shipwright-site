@@ -1,0 +1,55 @@
+# The two suites that stand between a refactor and a wrong number on a public
+# page. They have always been run by hand, which means they have not really
+# been run: a suite nothing executes is a suite that protects nothing.
+#
+# Boring on purpose, because a first CI is infrastructure nobody has to debug:
+#
+#   - Node 20, the same version netlify.toml pins, so CI tests the runtime the
+#     site actually deploys on rather than a different one.
+#   - No dependency install. There is no dependencies block and no lockfile, so
+#     `npm ci` would only ever be a thing to break. Both suites run on the Node
+#     standard library and neither needs node_modules.
+#   - No cache, for the same reason. There is nothing to cache.
+#   - No secrets, and read-only permissions. The suites set their own
+#     placeholder SUPABASE_* values and pass them to the build explicitly, so
+#     nothing here needs a credential.
+#
+# Both steps are unconditional on purpose. There is no "if the file exists"
+# guard and no continue-on-error, because a check that skips itself when its
+# subject is missing is the same defect as an unrun suite: a green run that
+# proved nothing.
+name: tests
+
+on:
+  pull_request:
+    branches:
+      - main
+      - feat/leaderboard-page
+
+permissions:
+  contents: read
+
+# A new push makes the previous run irrelevant. Do not spend runner minutes
+# proving the same thing twice.
+concurrency:
+  group: tests-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # The minifier guard's own suite. This is the one that must never go
+      # green while the guard is unwired.
+      - name: npm test
+        run: npm test
+
+      # Every state of the page, re-checked in one command, 294 assertions.
+      - name: page check
+        run: node scripts/check-page.mjs
