@@ -57,9 +57,10 @@ one byte per character of the name, so renaming a file moves the measurement
 without a byte of the code changing. Every count here is content only.
 
 **2. zlib and GNU gzip are different encoders, and they disagree.** Measured on
-this tree, for identical bytes: zlib is 20 bytes larger for `dist/main.js`, 22
-*smaller* for `dist/styles.css`. So a hand-run `gzip` and this harness can land
-on opposite sides of a budget. The harness measures both and prints the delta.
+the leaderboard page tree, for identical bytes: zlib is 20 bytes larger for the
+entry script and 22 *smaller* for `dist/styles.css`. The gap is not a constant,
+so the harness measures it rather than assuming it. A hand-run `gzip` and this
+harness can land on opposite sides of a budget. It prints the delta.
 If a verdict would flip between them it reports `UNSETTLED` instead of
 publishing the flattering number.
 
@@ -72,7 +73,7 @@ where that surfaces.
 derived from `dist/index.html` by reading `<link href>` and `<script src>`. An
 Open Graph image referenced only from a `<meta>` tag is fetched by crawlers, so
 it is reported as shipped weight instead of charged to the first-load budget.
-On this tree that is the difference between 8.3 KB and 26.6 KB.
+On the leaderboard page tree that is the difference between 8.3 KB and 26.6 KB.
 
 **5. "0 matches" can mean the scan never ran.** The harness prints the files it
 read. Reading zero files is `NOT SCANNED` and fails. It also refuses to guess
@@ -116,7 +117,6 @@ scripts/
   dev.mjs       build plus a static file server. Node stdlib only.
   measure.mjs   the byte budgets and the XSS scan. Node stdlib only.
   measure-selftest.mjs  drives measure.mjs through the cases that must fail.
-  check-page.mjs page behaviour, driven from Node with no browser.
 dist/           build output. Gitignored: it embeds the anon key.
 netlify.toml    build command, publish directory, and response headers.
 ```

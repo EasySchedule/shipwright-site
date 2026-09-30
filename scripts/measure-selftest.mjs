@@ -15,7 +15,7 @@
 // Node standard library only, like the rest of scripts/.
 
 import { execFile } from 'node:child_process';
-import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -109,7 +109,12 @@ const CASES = [
     expect: 2,
     wantIn: 'no top-level HTML file',
     async apply(dir) {
-      await rm(join(dir, 'src', 'main.js'));
+      // Remove whatever entry script this tree has. It is app.js on main and
+      // main.js on the leaderboard page, so a hardcoded name makes this case
+      // run on one tree and crash on the other.
+      for (const name of await readdir(join(dir, 'src'))) {
+        if (name.endsWith('.js')) await rm(join(dir, 'src', name));
+      }
       await rm(join(dir, 'src', 'index.html'));
       await rm(join(dir, 'src', 'styles.css'));
       await writeFile(join(dir, 'src', 'notes.txt'), 'not scannable, and no entry document\n');
@@ -237,7 +242,14 @@ async function runCase(testCase) {
     for (const part of ['scripts', 'src', 'package.json']) {
       await cp(join(ROOT, part), join(dir, part), { recursive: true });
     }
-    await testCase.apply(dir);
+    try {
+      await testCase.apply(dir);
+    } catch (err) {
+      // A fixture that cannot be built is a failure of this case alone. Letting
+      // it throw would kill the whole run, and a suite that dies partway has
+      // reported on nothing after the crash.
+      return { code: 'none', output: `fixture error: ${err.message}`, fixtureError: true };
+    }
     // Default: no credential in the environment, so --placeholder-config is
     // what makes the run possible. A case can override that.
     const env = { ...process.env, SUPABASE_URL: '', SUPABASE_ANON_KEY: '', ...(testCase.env || {}) };
@@ -265,14 +277,15 @@ let failed = 0;
 process.stdout.write('measure.mjs self-test\n\n');
 
 for (const testCase of CASES) {
-  const { code, output, timedOut } = await runCase(testCase);
+  const { code, output, timedOut, fixtureError } = await runCase(testCase);
   const wantText = testCase.wantIn;
   const matched = wantText === '' || output.includes(wantText);
-  const ok = !timedOut && code === testCase.expect && matched;
+  const ok = !timedOut && !fixtureError && code === testCase.expect && matched;
   if (!ok) failed += 1;
+  const gotExit = timedOut ? 'TIMED OUT' : fixtureError ? 'FIXTURE ERROR' : code;
   process.stdout.write(
     `  [${ok ? 'ok  ' : 'FAIL'}] ${testCase.name}\n` +
-      `           exit ${timedOut ? 'TIMED OUT' : code} (want ${testCase.expect}), ` +
+      `           exit ${gotExit} (want ${testCase.expect}), ` +
       `${wantText === '' ? 'output not checked' : `output ${matched ? 'contains' : 'DOES NOT contain'} ${JSON.stringify(wantText)}`}\n`,
   );
   if (!ok) {
