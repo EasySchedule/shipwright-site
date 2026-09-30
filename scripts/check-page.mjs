@@ -576,7 +576,6 @@ for (const [name, respond] of [
   ['a payload that is not a list', responder({ rows: [] })],
   ['a payload that is a string', responder('nope')],
 ]) {
-  const document = new ShallowDocument();
   const mounted = mount();
   requests.length = 0;
   const start = page.makeStart(CONFIG, respond);
@@ -593,7 +592,6 @@ for (const [name, respond] of [
   check('failed (' + name + '): no divider renders', !html.includes('class="band'));
   check('failed (' + name + '): nothing from the upstream reason leaks', !/PGRST|ECONNREFUSED|10\.0\.0\.1|500|internal error/.test(html), html.slice(0, 300));
   equal('failed (' + name + '): the board is no longer busy', mounted.board.getAttribute('aria-busy'), 'false');
-  void document;
 
   const button = mounted.board.queryOne((e) => e.tagName === 'BUTTON');
   check('failed (' + name + '): the retry control is a real button', button !== null && button.type === 'button');
