@@ -3,27 +3,60 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Shipwright</title>
-    <meta
-      name="description"
-      content="Shipwright: a measured optimization leaderboard for oh-my-pi."
-    />
+    <title>Shipwright — oh-my-pi latency leaderboard</title>
+    <!-- Spec section 5 strings are kept on one source line each on purpose: HTML
+         collapses whitespace, but an exact-match check against the raw response
+         (AC-01) or against an attribute value (AC-42) must find the string. -->
+    <meta name="description" content="Every measured change to oh-my-pi's speed, ranked by how much it improved. Everything else on this board is still being measured." />
+    <link rel="canonical" href="https://shipwright-spr3.netlify.app" />
+    <meta property="og:title" content="Shipwright — oh-my-pi latency leaderboard" />
+    <meta property="og:description" content="Every measured change to oh-my-pi's speed, ranked by how much it improved. Everything else on this board is still being measured." />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://shipwright-spr3.netlify.app" />
+    <meta property="og:image" content="https://shipwright-spr3.netlify.app/og-image.png" />
+    <meta name="twitter:card" content="summary" />
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
     <main>
-      <h1>Shipwright</h1>
-      <p class="lede">
-        A surface publishes no number until a measurement carries its commit,
-        its measuring command and its date.
-      </p>
-      <p id="status" class="status" role="status">Checking build configuration&hellip;</p>
-      <p class="note">
-        The leaderboard reads from Supabase under row level security. This
-        placeholder page proves the build pipeline only; it shows no
-        measurements.
-      </p>
+      <!-- 1. Masthead. Static text: readable with no JavaScript and no network. -->
+      <header class="masthead">
+        <p class="wordmark">Shipwright</p>
+        <h1>oh-my-pi latency leaderboard</h1>
+        <p class="standfirst">Every measured change to oh-my-pi's speed, ranked by how much it improved. Everything else on this board is still being measured.</p>
+      </header>
+
+      <!-- 2. Status line. The one element that changes between states. -->
+      <p id="status" class="status" role="status" aria-live="polite" data-state="loading">Loading the board.</p>
+
+      <!-- 3. Board note. Above the rows, because the rows start out thin. -->
+      <p class="board-note">A number appears on this board only when it carries a commit and a measurement you can rerun.</p>
+
+      <!-- 4. The board. src/app.js renders one of the six states here. -->
+      <div id="board" class="board"></div>
+
+      <!-- With scripting off this renders; with scripting on the parser never
+           turns it into DOM, so it adds no node to the six sections below. -->
+      <noscript>
+        <p class="noscript">This board reads its numbers from our database in your browser, so it needs JavaScript to show them. How we measure is below.</p>
+      </noscript>
+
+      <!-- 5. The method. Below the fold: the answer before the explanation. -->
+      <section class="how" aria-labelledby="how-heading">
+        <h2 id="how-heading">How we measure</h2>
+        <p>A result appears on this board only when it carries all five of these: the commit that made the change, the command that measured it, the metric and the unit it was measured in, the date it was measured, and who measured it.</p>
+        <p>A change missing any one of those stays in Still measuring. It is never given a number, and it is never given a zero.</p>
+        <p>A zero appears here only when zero is the proven result.</p>
+        <p>This page reads the board from our database every time you open it. It does not cache, so a missing number means the measurement has not landed yet.</p>
+      </section>
+
+      <!-- 6. Footer. -->
+      <footer class="footer">
+        <p>Shipwright · oh-my-pi latency leaderboard</p>
+      </footer>
     </main>
+    <!-- config.js is written by scripts/build.mjs from SUPABASE_URL and
+         SUPABASE_ANON_KEY. That build never reads the service-role key. -->
     <script src="./config.js"></script>
     <script type="module" src="./app.js"></script>
   </body>
