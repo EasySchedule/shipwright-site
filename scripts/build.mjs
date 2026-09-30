@@ -139,7 +139,6 @@ export function minifyJs(source) {
     if (a === '/' && (b === '/' || b === '*')) return true;
     if (a === '+' && b === '/') return true;
     if (a === '-' && b === '/') return true;
-    if (b === '+' && (a === a)) return false;
     return false;
   };
 
@@ -302,6 +301,97 @@ export function minifyJs(source) {
   return out.replace(/[ \t]+\n/g, '\n').replace(/\n{2,}/g, '\n').trim() + '\n';
 }
 
+// Characters that mean a `/`-run is a piece of code rather than one pattern.
+// Used only to keep the guard below from mistaking ordinary division for a
+// regex literal; it never causes a mangled pattern to be published.
+const CODE_PUNCTUATION = /[;{},()=]/;
+
+/**
+ * Refuse to publish source that the minifier is known to mangle.
+ *
+ * Known, narrow limitation. From a `/` alone the minifier cannot tell a
+ * division from a regex literal. It resolves that by looking at the previous
+ * character, and after `)`, `]` or `}` both readings are real: `if (x)
+ * /re/.test(s)` is a pattern, `(a + b) / 2` is a division. It guesses
+ * "division", then re-whitespaces the run as if it were ordinary code.
+ *
+ * Inside a pattern, whitespace is significant. So `/ foo - bar /` becomes
+ * `/foo-bar/`, which turns a non-match into a match, with no error anywhere:
+ *
+ *   if (1) / foo - bar /.test("foo-bar")   // false
+ *   if (1) /foo-bar/.test("foo-bar")       // true
+ *
+ * `assertParses` cannot catch this, because the mangled output still parses
+ * perfectly. `node --check` proves syntax, not meaning.
+ *
+ * So the build stops instead of shipping it. The check is narrow on purpose: it
+ * only considers a run that looks like a single pattern, and only complains
+ * when minifying that run would actually change it. A hand-written page has no
+ * reason to contain one, and a red build beats a leaderboard quietly showing
+ * the wrong number.
+ *
+ * Fixing this properly means a real JavaScript lexer, which is a lot of code to
+ * carry for a few kilobytes of first-party source. That trade is a review
+ * decision, not a build-script decision.
+ */
+export function findUnmangleableRuns(source) {
+  const offenders = [];
+  const n = source.length;
+
+  for (let i = 0; i < n; i += 1) {
+    if (source[i] !== '/') continue;
+
+    // The previous non-space character has to be one of the three that make
+    // the reading ambiguous.
+    let k = i - 1;
+    while (k >= 0 && (source[k] === ' ' || source[k] === '\t')) k -= 1;
+    if (k < 0) continue;
+    const prev = source[k];
+    if (prev !== ')' && prev !== ']' && prev !== '}') continue;
+
+    // Skip `//` and `/*`, which are comments, not literals.
+    if (source[i + 1] === '/' || source[i + 1] === '*') continue;
+
+    // Find a closing `/` on the same line, respecting `[...]`.
+    let j = i + 1;
+    let inClass = false;
+    let closed = false;
+    while (j < n) {
+      const c = source[j];
+      if (c === '\\') { j += 2; continue; }
+      if (c === '\n') break;
+      if (c === '[') inClass = true;
+      else if (c === ']') inClass = false;
+      else if (c === '/' && !inClass) { j += 1; closed = true; break; }
+      j += 1;
+    }
+    if (!closed) continue;
+
+    while (j < n && /[a-z]/.test(source[j])) j += 1;
+    const run = source.slice(i, j);
+
+    // A run containing code punctuation is an expression, not a pattern.
+    if (CODE_PUNCTUATION.test(run)) continue;
+
+    // Strip the delimiters to get the pattern itself.
+    const closer = run.replace(/^\//, '').replace(/\/[a-z]*$/, '');
+    if (closer === '') continue;
+    try {
+      new RegExp(closer);
+    } catch {
+      continue;
+    }
+
+    // Compare in context, not in isolation. Minified on its own the run always
+    // begins at position 0, where the leading `/` is unambiguously a pattern and
+    // it is copied verbatim. It only gets re-whitespaced in the position this
+    // guard is about, so that is the position it has to be tested in.
+    if (minifyJs(`)${run}`).trim() !== `)${run}`) offenders.push(run);
+  }
+
+  return offenders;
+}
+
 /** Reject output that is not parseable, so a minifier bug is a red build. */
 async function assertParses(file) {
   try {
@@ -337,6 +427,26 @@ export async function build() {
 
     if (extname(rel) === '.js') {
       const source = await readFile(from, 'utf8');
+
+      // Refuse before writing anything, not after: a mangled pattern parses
+      // fine, so `assertParses` would wave it through.
+      const offenders = findUnmangleableRuns(source);
+      if (offenders.length > 0) {
+        process.stderr.write(
+          `build: ${rel}: ${offenders.length} regex literal(s) the minifier would ` +
+            'mangle, because a `/` follows `)`, `]` or `}` and cannot be told ' +
+            'apart from a division.\n',
+        );
+        for (const run of offenders) {
+          process.stderr.write(`  would change: ${JSON.stringify(run)}\n`);
+        }
+        process.stderr.write(
+          'build: rewrite it so the division or the regex is unambiguous, for ' +
+            'example by assigning the left side to a variable first.\n',
+        );
+        process.exit(1);
+      }
+
       const minified = minifyJs(source);
       rawJsBytes += Buffer.byteLength(source);
       jsBytes += Buffer.byteLength(minified);
