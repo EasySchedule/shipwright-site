@@ -91,6 +91,15 @@ function isIdentifierChar(ch) {
   return ch !== undefined && WORD.test(ch);
 }
 
+// Characters that can start the next operand of a division: an identifier, a
+// number, `$`, a grouping paren, an array or object literal, a string, a
+// template, or a unary sign.
+//
+// `!` and `~` are deliberately absent. `!/ a b /.test(s)` is a real pattern
+// position, so reading `!` as the start of an operand would hide the very thing
+// this file exists to catch.
+const OPERAND_START = /[A-Za-z0-9_$([{'"`+-]/;
+
 /**
  * Minify first-party JavaScript by removing comments and unnecessary
  * whitespace.
@@ -117,6 +126,10 @@ export function minifyJs(source) {
   // Last emitted identifier/keyword, for regex-vs-division detection.
   let lastWord = '';
   let pendingSpace = false;
+  // True while nothing but whitespace has been emitted since the last line
+  // terminator. Nothing has been emitted at all at the start of the file, which
+  // is the same thing.
+  let lineStart = true;
 
   const regexAllowed = () => {
     if (lastChar === '') return true;
@@ -126,6 +139,58 @@ export function minifyJs(source) {
       return !lastWord;
     }
     return true;
+  };
+
+  /**
+   * Scan the `/`-run that starts at the `/` at index `from`, and return the
+   * index just past it, flags included, or -1 if the run does not close on this
+   * line.
+   *
+   * A regex literal cannot contain a raw newline, so that is the only thing that
+   * can fail, and a failure means there is no pattern here -- the character is a
+   * division operator and nothing is copied for it.
+   *
+   * This is also the one place the minifier does not have to guess. Everywhere
+   * else it decides regex-or-division from `lastChar`, because the previous
+   * character settles it. At the start of a line there is no previous character
+   * to consult -- the one before the line break says nothing about this `/` --
+   * and both readings are real:
+   *
+   *   if (1)
+   *     / foo - bar /.test(s)      a pattern
+   *   return (a)
+   *     / 2 / 3;                   a division
+   *
+   * So at the start of a line the run is copied byte for byte and the guess is
+   * skipped. That is safe in both directions, and it needs no third heuristic to
+   * be safe in both directions, because whitespace is significant in only one of
+   * them: inside a pattern, where copying it preserves the match, and not inside
+   * a division, where the `/` characters are operators and the spaces between
+   * them mean nothing. The JavaScript parser, which can see the whole program, is
+   * the thing that decides which of the two it is looking at.
+   *
+   * This is the position that reached `dist/` in SHI-64. The guard below only
+   * looks at runs whose closing `)`, `]` or `}` is on the same line, so a
+   * statement beginning on its own line after a block was unguarded, and the
+   * minifier was guessing about it too: it exited 0 and published `/foo-bar/`
+   * for a source whose `/ foo - bar /` did not match.
+   */
+  const scanRegexRun = (from) => {
+    let j = from + 1;
+    let inClass = false;
+    let closed = false;
+    while (j < n) {
+      const c = source[j];
+      if (c === '\\') { j += 2; continue; }
+      if (c === '\n') break;
+      if (c === '[') inClass = true;
+      else if (c === ']') inClass = false;
+      else if (c === '/' && !inClass) { j += 1; closed = true; break; }
+      j += 1;
+    }
+    if (!closed) return -1;
+    while (j < n && /[a-z]/.test(source[j])) j += 1;
+    return j;
   };
 
   const needSpaceBetween = (nextCh) => {
@@ -144,6 +209,10 @@ export function minifyJs(source) {
 
   const push = (text) => {
     out += text;
+    // Whitespace is not a statement. A push that is only spaces leaves the
+    // line-start state alone; the two places that emit a newline set it
+    // themselves, right after pushing.
+    if (/\S/.test(text)) lineStart = false;
     for (const ch of text) {
       if (/\s/.test(ch)) continue;
       lastChar = ch;
@@ -178,6 +247,7 @@ export function minifyJs(source) {
     if (sawNewline) {
       pushSpaceIfNeeded(source[j]);
       push('\n');
+      lineStart = true;
       pendingSpace = false;
     } else {
       pendingSpace = true;
@@ -211,6 +281,7 @@ export function minifyJs(source) {
       if (body.includes('\n')) {
         pushSpaceIfNeeded('x');
         push('\n');
+        lineStart = true;
         pendingSpace = false;
       } else {
         pendingSpace = true;
@@ -272,26 +343,18 @@ export function minifyJs(source) {
       continue;
     }
 
-    // Regex literal.
-    if (ch === '/' && (regexAllowed() || REGEX_PRECEDING_KEYWORDS.has(lastWord))) {
-      let j = i + 1;
-      let inClass = false;
-      let closed = false;
-      while (j < n) {
-        const c = source[j];
-        if (c === '\\') { j += 2; continue; }
-        if (c === '\n') break;
-        if (c === '[') inClass = true;
-        else if (c === ']') inClass = false;
-        else if (c === '/' && !inClass) { j += 1; closed = true; break; }
-        j += 1;
-      }
-      if (closed) {
-        while (j < n && /[a-z]/.test(source[j])) j += 1;
-        push(source.slice(i, j));
-        i = j;
+    // Regex literal. `lineStart` covers the positions where `lastChar` cannot:
+    // see scanRegexRun, which is also where the reason for copying a
+    // line-leading run verbatim is written down.
+    if (ch === '/' && (lineStart || regexAllowed() || REGEX_PRECEDING_KEYWORDS.has(lastWord))) {
+      const end = scanRegexRun(i);
+      if (end !== -1) {
+        push(source.slice(i, end));
+        i = end;
         continue;
       }
+      // Nothing closes on this line, so there is no pattern to copy. It is a
+      // division operator, and the push below emits it as one.
     }
 
     push(ch);
@@ -310,10 +373,10 @@ const CODE_PUNCTUATION = /[;{},()=]/;
  * Refuse to publish source that the minifier is known to mangle.
  *
  * Known, narrow limitation. From a `/` alone the minifier cannot tell a
- * division from a regex literal. It resolves that by looking at the previous
- * character, and after `)`, `]` or `}` both readings are real: `if (x)
- * /re/.test(s)` is a pattern, `(a + b) / 2` is a division. It guesses
- * "division", then re-whitespaces the run as if it were ordinary code.
+ * division from a regex literal, and after `)`, `]` or `}` both readings are
+ * real: `if (x) /re/.test(s)` is a pattern, `(a + b) / 2` is a division. With
+ * the closer on the same line that is all the minifier has to go on, and it
+ * guesses "division", then re-whitespaces the run as if it were ordinary code.
  *
  * Inside a pattern, whitespace is significant. So `/ foo - bar /` becomes
  * `/foo-bar/`, which turns a non-match into a match, with no error anywhere:
@@ -325,14 +388,21 @@ const CODE_PUNCTUATION = /[;{},()=]/;
  * perfectly. `node --check` proves syntax, not meaning.
  *
  * So the build stops instead of shipping it. The check is narrow on purpose: it
- * only considers a run that looks like a single pattern, and only complains
- * when minifying that run would actually change it. A hand-written page has no
- * reason to contain one, and a red build beats a leaderboard quietly showing
- * the wrong number.
+ * only considers a run that reads as one whole pattern, and only complains when
+ * minifying that run in its own position would actually change it. A
+ * hand-written page has no reason to contain one, and a red build beats a
+ * leaderboard quietly showing the wrong number.
  *
- * Fixing this properly means a real JavaScript lexer, which is a lot of code to
- * carry for a few kilobytes of first-party source. That trade is a review
- * decision, not a build-script decision.
+ * This covers the same-line positions only, and on its own that left the
+ * line-leading ones unguarded: the walk back to the closer stopped at a newline,
+ * so a statement beginning on its own line after a block reached `dist/` with a
+ * mangled pattern and an exit code of 0. Those are closed in minifyJs instead,
+ * which copies a line-leading run byte for byte rather than guessing about it.
+ * There is nothing left here for them, so nothing here refuses them.
+ *
+ * Fixing the remaining guessing properly means a real JavaScript lexer, which is
+ * a lot of code to carry for a few kilobytes of first-party source. That trade
+ * is a review decision, not a build-script decision.
  */
 export function findUnmangleableRuns(source) {
   const offenders = [];
@@ -342,7 +412,10 @@ export function findUnmangleableRuns(source) {
     if (source[i] !== '/') continue;
 
     // The previous non-space character has to be one of the three that make
-    // the reading ambiguous.
+    // the reading ambiguous. Spaces and tabs only, and not newlines: a `/` that
+    // starts a line is handled by minifyJs copying the run verbatim, so there is
+    // nothing here for this guard to refuse, and refusing it would be refusing
+    // correct code. See the note on the regex branch in minifyJs.
     let k = i - 1;
     while (k >= 0 && (source[k] === ' ' || source[k] === '\t')) k -= 1;
     if (k < 0) continue;
@@ -370,6 +443,20 @@ export function findUnmangleableRuns(source) {
     while (j < n && /[a-z]/.test(source[j])) j += 1;
     const run = source.slice(i, j);
 
+    // If the next token can start an operand, this is not one whole pattern but
+    // the first half of `left / b / c`, and there is nothing in it to mangle:
+    //
+    //   const n = f(x) / 2 / 3;
+    //                    ^^^^  the run closes here, and `3` follows it
+    //
+    // `/ 2 /` is a legal pattern and `f(x) / 2 / 3` is legal division, so every
+    // other test below passes on it, and the guard used to report ordinary
+    // arithmetic as a mangled pattern. A division can be followed by the next
+    // operand of its chain; a pattern cannot.
+    let after = j;
+    while (after < n && (source[after] === ' ' || source[after] === '\t')) after += 1;
+    if (after < n && OPERAND_START.test(source[after])) continue;
+
     // A run containing code punctuation is an expression, not a pattern.
     if (CODE_PUNCTUATION.test(run)) continue;
 
@@ -385,8 +472,10 @@ export function findUnmangleableRuns(source) {
     // Compare in context, not in isolation. Minified on its own the run always
     // begins at position 0, where the leading `/` is unambiguously a pattern and
     // it is copied verbatim. It only gets re-whitespaced in the position this
-    // guard is about, so that is the position it has to be tested in.
-    if (minifyJs(`)${run}`).trim() !== `)${run}`) offenders.push(run);
+    // guard is about, so that is the position it has to be tested in. The
+    // closer that made the position ambiguous is prepended rather than a fixed
+    // `)`, so the context is the one the run actually sits in.
+    if (minifyJs(`${prev}${run}`).trim() !== `${prev}${run}`) offenders.push(run);
   }
 
   return offenders;
