@@ -5,6 +5,7 @@
 
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { readdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
@@ -36,7 +37,11 @@ test('both variables set: builds, exits 0, writes both values', () => {
   const result = runBuild({ SUPABASE_URL: URL_VALUE, SUPABASE_ANON_KEY: KEY_VALUE });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /config\.js written/);
-  assert.match(result.stdout, /3 file\(s\)/);
+  // Counted from src/ rather than written down, so the assertion keeps its
+  // meaning -- every source file is published, none skipped, none invented --
+  // without becoming a tripwire every time a file is added to the page.
+  const files = readdirSync(resolve(ROOT, 'src'));
+  assert.match(result.stdout, new RegExp(`${files.length} file\\(s\\)`));
 });
 
 for (const [name, env, expected] of [
