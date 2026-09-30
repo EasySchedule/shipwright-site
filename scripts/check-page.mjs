@@ -326,7 +326,11 @@ const LAUNCH_ROWS = [
 const shellHtml = await readFile(join(ROOT, 'src', 'index.html'), 'utf8');
 const clientSource = await readFile(join(ROOT, 'src', 'main.js'), 'utf8');
 
-const CONFIG = { url: 'https://nchzjfznvnfsqnrsrzgt.supabase.co', key: 'anon-test-key' };
+// The URL is a placeholder on purpose. It must never be the real project URL:
+// Netlify's secret scan fails any build whose tracked files contain the value
+// of a build environment variable, and that failure is what broke the
+// GitHub-triggered deploys before this placeholder was in place.
+const CONFIG = { url: 'https://example.supabase.co', key: 'anon-test-key' };
 const requests = [];
 
 function mount() {
