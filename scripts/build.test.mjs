@@ -5,8 +5,9 @@
 
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { readdirSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 
@@ -41,6 +42,78 @@ function runBuild(env) {
     encoding: 'utf8',
     env: childEnv,
   });
+}
+
+/**
+ * Run the real build script against a synthetic source tree.
+ *
+ * `build.mjs` fixes SRC_DIR and OUT_DIR at load time from its own location, and
+ * `runBuild` above spawns it with cwd: ROOT. So every test there is forced to
+ * build the real src/, and the real src/ contains nothing the guard objects to.
+ * That is the whole reason deleting the guard call leaves this suite green: no
+ * test ever handed build() a source it would refuse, so nothing observed it.
+ *
+ * build.mjs imports only node:* builtins, so copying the one file into a temp
+ * tree relocates ROOT to that tree and the copy is self-contained. Nothing in
+ * production changes, and the repository's own src/ and dist/ are never
+ * touched -- which the alternative, swapping a fixture into src/, would do,
+ * clobbering the page's source and racing a concurrent build.
+ *
+ * `source` is written to src/probe.js. Pass undefined to run with an empty src/,
+ * which the build refuses for its own reason. Returns spawnSync's result, so a
+ * case can assert on the exit code and on the text the build printed.
+ */
+function runBuildInTempTree(source) {
+  const dir = mkdtempSync(join(tmpdir(), 'shipwright-build-'));
+  try {
+    mkdirSync(join(dir, 'scripts'));
+    mkdirSync(join(dir, 'src'));
+    // Copied per call, so the run always tests the build.mjs in the tree right
+    // now rather than a snapshot taken when this file was written.
+    copyFileSync(BUILD, join(dir, 'scripts/build.mjs'));
+    if (source !== undefined) writeFileSync(join(dir, 'src/probe.js'), source, 'utf8');
+    return spawnSync(process.execPath, [join(dir, 'scripts/build.mjs')], {
+      cwd: dir,
+      encoding: 'utf8',
+      env: {
+        PATH: process.env.PATH ?? '',
+        SUPABASE_URL: URL_VALUE,
+        SUPABASE_ANON_KEY: KEY_VALUE,
+      },
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Assert the build stopped in the guard, on this literal, and said why.
+ *
+ * The headline and the count are checked as well as the literal, because exit 1
+ * on its own proves nothing: a missing credential exits 1 too, and a case that
+ * only asserted the code could pass against a build that failed for a reason
+ * that has nothing to do with the guard. The literal name is what makes the
+ * message specific to this source file.
+ */
+function assertGuardRefused(result, literal) {
+  const output = `${result.stdout}${result.stderr}`;
+  assert.equal(
+    result.status,
+    1,
+    `expected the build to refuse this source, it exited ${result.status}:\n${output}`,
+  );
+  assert.ok(
+    result.stderr.includes('the minifier would mangle'),
+    `expected the guard's own message, got: ${output}`,
+  );
+  assert.ok(
+    result.stderr.includes(literal),
+    `expected the guard to name ${JSON.stringify(literal)}, got: ${output}`,
+  );
+  assert.ok(
+    result.stderr.includes('1 regex literal(s)'),
+    `expected exactly one offender reported, got: ${output}`,
+  );
 }
 
 test('both variables set: builds, exits 0, writes both values', () => {
@@ -254,4 +327,78 @@ test('the guard is silent on named regex literals', () => {
       `unexpected offender in: ${source}`,
     );
   }
+});
+
+/*
+ * The guard has to run inside build(), not only when it is called directly.
+ *
+ * Every test above reaches the guard by calling `findUnmangleableRuns`, and the
+ * one end-to-end test builds the real src/, which is clean by construction. So
+ * the suite still passes if build() stops calling the guard at all: replace
+ * `findUnmangleableRuns(source)` with `[]` in build() and this file stays green
+ * while the page ships with `/ foo - bar /` minified into `/foo-bar/`.
+ *
+ * What was missing is a build that is handed a source the guard would reject.
+ * These cases run the real, unmodified build.mjs in a temp tree (see
+ * runBuildInTempTree), so what is under test is the wiring inside build() and
+ * not the exported function.
+ */
+
+// Same four shapes as `guard catches every shape that triggers the blind spot`
+// above, byte for byte, so the unit test and this one cannot drift apart: one
+// asserts the guard finds them, the other asserts build() refuses to ship them.
+// All four put the `/` after `)`; what varies is the pattern body, which is where
+// the interesting traps are. `.` and `*` are regex metacharacters, so a run
+// containing them has to still read as one pattern rather than as an expression.
+// The build never executes src/ -- it reads, minifies, and `node --check`s -- so
+// these sources do not need their identifiers declared.
+const HOSTILE_SHAPES = [
+  ['a pattern whose body reads as arithmetic', 'if (x) / foo - bar /.test(s);', '/ foo - bar /'],
+  ['a pattern containing a dot', 'if (a[0]) / a . b /.test(s);', '/ a . b /'],
+  ['a pattern containing a star', 'if (o.k) / a * b /.test(s);', '/ a * b /'],
+  [
+    'a pattern whose mangling flips a result',
+    'let hit=0; if (1) / x y /.test("xy") && (hit=1);',
+    '/ x y /',
+  ],
+];
+
+test('end to end: the build refuses a source the minifier would mangle', () => {
+  // Whitespace inside the pattern is what carries the meaning, so a mangled
+  // build still parses and still runs. This is the case that has to be refused.
+  const result = runBuildInTempTree(
+    'let hit = 0;\nif (1) / foo - bar /.test("foo-bar") && (hit = 1);\nif (!hit) throw new Error("unreachable");\n',
+  );
+  assertGuardRefused(result, '/ foo - bar /');
+});
+
+test('end to end: the same temp-tree harness builds a clean source', () => {
+  // Without this, the refusal above could be passing because the harness is
+  // broken -- a copy that will not run, a missing credential -- rather than
+  // because the guard fired. Same helper, same spawn, clean source: exit 0.
+  const result = runBuildInTempTree(
+    'const SPACED = / foo - bar /;\nconst TRAILING = /\\/+$/;\nif (SPACED.source.length === 0) throw new Error("x");\nif (TRAILING.source.length === 0) throw new Error("y");\n',
+  );
+  const output = `${result.stdout}${result.stderr}`;
+  assert.equal(result.status, 0, `expected a clean source to build:\n${output}`);
+  assert.match(result.stdout, /config\.js written/);
+});
+
+for (const [name, source, literal] of HOSTILE_SHAPES) {
+  test(`end to end: the build refuses ${name}`, () => {
+    assertGuardRefused(runBuildInTempTree(`${source}\n`), literal);
+  });
+}
+
+test('end to end: an empty src/ is refused, so a temp-tree refusal names the guard', () => {
+  // The last thing a temp-tree case should be able to do is pass for the wrong
+  // reason. An empty src/ is the build's own refusal, it never reaches the
+  // guard, and it must not satisfy assertGuardRefused.
+  const result = runBuildInTempTree(undefined);
+  assert.equal(result.status, 1, `expected an empty src/ to be refused:\n${result.stdout}${result.stderr}`);
+  assert.match(result.stderr, /src\/ is empty/);
+  assert.ok(
+    !result.stderr.includes('the minifier would mangle'),
+    `guard message on a source the guard never read: ${result.stderr}`,
+  );
 });
