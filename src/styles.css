@@ -1,0 +1,57 @@
+:root {
+  color-scheme: light dark;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  font: 16px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  padding: 2rem;
+}
+
+main {
+  max-width: 34rem;
+}
+
+h1 {
+  font-size: 1.75rem;
+  margin: 0 0 0.5rem;
+  letter-spacing: -0.01em;
+}
+
+.lede {
+  margin: 0 0 1.5rem;
+  opacity: 0.8;
+}
+
+.status {
+  margin: 0 0 1rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid currentColor;
+  border-radius: 6px;
+  font-size: 0.95rem;
+}
+
+.status[data-state="ok"] {
+  opacity: 0.85;
+}
+
+.status[data-state="missing"] {
+  border-color: #b3261e;
+  color: #b3261e;
+  font-weight: 600;
+}
+
+@media (prefers-color-scheme: dark) {
+  .status[data-state="missing"] {
+    color: #f2b8b5;
+  }
+}
+
+.note {
+  margin: 0;
+  font-size: 0.9rem;
+  opacity: 0.65;
+}

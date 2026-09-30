@@ -1,0 +1,22 @@
+# Shipwright public site - Netlify build configuration.
+#
+# Static output. One Node-stdlib build script, no bundler, no dependencies.
+# `node scripts/build.mjs` fails the build when SUPABASE_URL or
+# SUPABASE_ANON_KEY is missing, so a missing credential is a red build here
+# rather than a deployed page that cannot read the database.
+
+[build]
+  command = "node scripts/build.mjs"
+  publish = "dist"
+
+[build.environment]
+  NODE_VERSION = "20"
+
+# Plain static headers. The page loads no third-party code, so the policy is
+# strict on purpose.
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    X-Frame-Options = "DENY"
