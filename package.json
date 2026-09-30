@@ -1,0 +1,15 @@
+{
+  "name": "shipwright-site",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Shipwright public site: a measured optimization leaderboard for oh-my-pi.",
+  "license": "MIT",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "dev": "node scripts/dev.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
