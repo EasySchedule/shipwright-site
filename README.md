@@ -16,6 +16,8 @@ time, and a leaderboard does not need one.
 | --- | --- |
 | `npm run dev` | Build, then serve `dist/` on <http://localhost:4321>. |
 | `npm run build` | Build `dist/` for deploy. This is the Netlify build command. |
+| `npm run measure` | Report the byte budgets and the XSS scan. Exits non-zero on a breach. |
+| `npm run measure:selftest` | Prove `measure` can still fail. Exits non-zero if it cannot. |
 
 Both are Node 20+. There is nothing to install: `npm install` is a no-op
 because there is no `dependencies` block.
@@ -26,6 +28,61 @@ values:
 ```sh
 cp .env.example .env
 ```
+
+## Measuring
+
+The spec budgets the static shell, first-party JavaScript, first-load weight
+and the Supabase response body, and it forbids four HTML sinks in `src/`. Those
+are numbers, so they come from one command rather than from whatever each
+person typed.
+
+```sh
+npm run measure -- --runs 10
+```
+
+Exit 0 when every budget passes and the scan is clean, 1 on a budget breach or
+a match, 2 when it cannot produce a number. The three exit codes are distinct
+on purpose: "2" means the harness refused, and a refusal is not a pass.
+
+`SUPABASE_URL` and `SUPABASE_ANON_KEY` must be set, because the build under
+test requires them. To measure only the credential-independent budgets without
+holding a key, pass `--placeholder-config`. It builds against a synthetic
+credential of a stated length and marks every figure derived from it.
+
+Five things the harness does that a hand-run command does not. Each of them is
+a way a plausible number goes wrong.
+
+**1. `gzip -c` writes the filename into the gzip header.** The count moves by
+one byte per character of the name, so renaming a file moves the measurement
+without a byte of the code changing. Every count here is content only.
+
+**2. zlib and GNU gzip are different encoders, and they disagree.** Measured on
+this tree, for identical bytes: zlib is 20 bytes larger for `dist/main.js`, 22
+*smaller* for `dist/styles.css`. So a hand-run `gzip` and this harness can land
+on opposite sides of a budget. The harness measures both and prints the delta.
+If a verdict would flip between them it reports `UNSETTLED` instead of
+publishing the flattering number.
+
+**3. A single number hides an unstable build.** Every measurement is taken
+across N rebuilds and reported with min/max/mean/median/spread. A build whose
+output size moves between runs on the same input has a defect, and this is
+where that surfaces.
+
+**4. "First load" is not "everything in `dist/`".** The visitor-reachable set is
+derived from `dist/index.html` by reading `<link href>` and `<script src>`. An
+Open Graph image referenced only from a `<meta>` tag is fetched by crawlers, so
+it is reported as shipped weight instead of charged to the first-load budget.
+On this tree that is the difference between 8.3 KB and 26.6 KB.
+
+**5. "0 matches" can mean the scan never ran.** The harness prints the files it
+read. Reading zero files is `NOT SCANNED` and fails. It also refuses to guess
+when it cannot derive the file set: no entry document, two entry documents, or
+a reference the build did not produce are all exit 2.
+
+`npm run measure:selftest` drives the harness through the cases that must fail
+and asserts on its exit code *and* its output, because a harness that exits 1
+for an unrelated reason has not proved anything. It needs no credential and no
+network.
 
 ## Environment variables
 
@@ -57,6 +114,9 @@ src/            source. Copied to dist/; .js files are minified.
 scripts/
   build.mjs     the build. Node stdlib only.
   dev.mjs       build plus a static file server. Node stdlib only.
+  measure.mjs   the byte budgets and the XSS scan. Node stdlib only.
+  measure-selftest.mjs  drives measure.mjs through the cases that must fail.
+  check-page.mjs page behaviour, driven from Node with no browser.
 dist/           build output. Gitignored: it embeds the anon key.
 netlify.toml    build command, publish directory, and response headers.
 ```
