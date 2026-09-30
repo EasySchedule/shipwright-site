@@ -205,6 +205,32 @@ class ShallowDocument {
 
 // --- Fixtures ---------------------------------------------------------------
 
+// The live `public.optimizations` columns, in the ordinal order
+// `information_schema.columns` returns them, read from the connected project.
+// This list is the contract the fixtures and the select list are both checked
+// against, because a fixture shaped like the spec's prose cannot catch a select
+// list shaped like a column the table does not have, and a PostgREST select
+// naming such a column fails the whole read with PGRST204.
+const TABLE_COLUMNS = [
+  'id',
+  'title',
+  'surface',
+  'summary',
+  'commit_sha',
+  'commit_url',
+  'metric',
+  'unit',
+  'before_value',
+  'after_value',
+  'improvement_pct',
+  'harness',
+  'measured_at',
+  'measured_by',
+  'published',
+  'created_at',
+  'kind',
+];
+
 const EVIDENCE = {
   before_value: 128,
   after_value: 41,
@@ -219,7 +245,7 @@ const EVIDENCE = {
 /** A row carrying a number and all nine evidence values. */
 function measured(overrides) {
   return Object.assign(
-    { id: 'm', title: 'Warm path', kind: 'Change', surface: '', description: '', improvement_pct: 67.97 },
+    { id: 'm', title: 'Warm path', kind: 'Change', surface: '', summary: '', improvement_pct: 67.97 },
     EVIDENCE,
     overrides,
   );
@@ -233,7 +259,7 @@ function unmeasured(overrides) {
       title: 'TUI interaction',
       surface: 'tui_interaction',
       kind: 'Surface',
-      description: 'How fast the terminal interface responds to you.',
+      summary: 'How fast the terminal interface responds to you.',
       before_value: null,
       after_value: null,
       unit: null,
@@ -253,21 +279,47 @@ const LAUNCH_ROWS = [
   unmeasured({
     id: '1',
     title: 'TUI interaction',
-    description: 'How fast the terminal interface responds to you.',
+    surface: 'tui_interaction',
+    summary: 'How fast the terminal interface responds to you.',
   }),
   unmeasured({
     id: '2',
     title: 'Repo indexing and file watching',
     surface: 'repo_indexing',
-    description: 'How fast the tool reads a repository and notices an edited file.',
+    summary: 'How fast the tool reads a repository and notices an edited file.',
   }),
   unmeasured({
     id: '3',
     title: 'Native text search',
     surface: 'native_text_search',
-    description: 'How fast the tool returns search results across a repository.',
+    summary: 'How fast the tool returns search results across a repository.',
   }),
 ];
+
+// A fixture that carries a column the table does not have cannot catch the
+// class of bug the live read failed on, and a fixture whose `surface` holds
+// the display label cannot catch the chip printing a raw enum. So the fixtures
+// are shaped like `information_schema`, and these checks hold them to it.
+{
+  const shaped = [
+    ['measured', measured()],
+    ['unmeasured', unmeasured()],
+    ...LAUNCH_ROWS.map((row, index) => ['launch row ' + (index + 1), row]),
+  ];
+  for (const [name, row] of shaped) {
+    const unknown = Object.keys(row).filter((key) => !TABLE_COLUMNS.includes(key));
+    check('fixture: ' + name + ' carries only columns the live table has', unknown.length === 0, JSON.stringify(unknown));
+  }
+  check('fixture: no fixture carries a description key, because the table has no such column', shaped.every(([, row]) => !('description' in row)));
+  check('fixture: the description lives in summary', LAUNCH_ROWS.every((row) => typeof row.summary === 'string' && row.summary !== ''));
+  check(
+    'fixture: surface carries the raw enum, not the display label',
+    LAUNCH_ROWS.every((row) => /^[a-z][a-z0-9_]*$/.test(row.surface) && row.surface !== row.title),
+    JSON.stringify(LAUNCH_ROWS.map((row) => [row.surface, row.title])),
+  );
+  check('fixture: every launch row is a surface', LAUNCH_ROWS.every((row) => row.kind === 'Surface'));
+  check('fixture: no launch row carries a measurement', LAUNCH_ROWS.every((row) => row.improvement_pct === null && row.before_value === null && row.after_value === null));
+}
 
 // --- The page ---------------------------------------------------------------
 
@@ -413,13 +465,26 @@ function boardHtml(board) {
   const url = new URL(requests[0].url);
   equal('request: one table', url.pathname, '/rest/v1/optimizations');
   check('request: no order is asked of the database', !url.searchParams.has('order'), url.search);
-  check('request: published is not selected', !url.searchParams.get('select').includes('published'));
   check('request: no service role key is present in the client', !clientSource.includes('service_role'));
   check('request: only the two build values are read', (clientSource.match(/SUPABASE_[A-Z_]+/g) ?? []).every((name) => name === 'SHIPWRIGHT_CONFIG'));
   equal('request: the anon key goes as apikey', requests[0].init.headers.apikey, CONFIG.key);
   equal('request: the anon key goes as a bearer token', requests[0].init.headers.Authorization, 'Bearer ' + CONFIG.key);
   equal('request: the read is not cached', requests[0].init.cache, 'no-store');
   equal('request: the method is a GET', requests[0].init.method, 'GET');
+
+  // The select list is a claim about the live schema, and PostgREST refuses the
+  // whole read with PGRST204 when the claim is wrong. These are hard checks, not
+  // a note: the read that ships is the read that has to be true.
+  const select = url.searchParams.get('select');
+  const selected = select.split(',');
+  for (const column of selected) {
+    check('request: the select list names a column the live table has: ' + column, TABLE_COLUMNS.includes(column));
+  }
+  check('request: description is not selected, because the table has no such column', !selected.includes('description'));
+  check('request: published is not selected, because row level security filters on it', !selected.includes('published'));
+  check('request: kind is selected, so the kind chip can render at all', selected.includes('kind'));
+  check('request: summary is selected, because the description is stored there', selected.includes('summary'));
+  check('request: the select list names no column twice', new Set(selected).size === selected.length, select);
 }
 
 // --- 3. The number rule -----------------------------------------------------
@@ -542,8 +607,36 @@ function boardHtml(board) {
   check('launch: the divider count reads 3 tracked', html.includes('>3 tracked<'));
   check('launch: the names render', html.includes('>TUI interaction<') && html.includes('>Native text search<'));
   check('launch: the descriptions render', html.includes('How fast the terminal interface responds to you.'));
-  check('launch: the surface chip renders', html.includes('>repo_indexing<'));
-  check('launch: the kind chip renders for a surface', html.includes('>Surface<'));
+  check('launch: no surface chip renders', !html.includes('class="chip chip-surface"'));
+
+  // Spec §7.2 wants the kind chip on an unmeasured row, which is every row in
+  // the launch state. The column exists, so a missing chip here is a defect and
+  // not a note.
+  equal(
+    'launch: the kind chip renders once per row',
+    (html.match(/class="chip chip-kind">Surface</g) ?? []).length,
+    3,
+  );
+  const launchRows = launch.board.queryAll((e) => e.hasClass('row-unmeasured'));
+  equal(
+    'launch: every row carries the measuring chip in its identity and the Surface kind chip',
+    launchRows.map((row) => [...row.toHtml().matchAll(/class="chip chip-([a-z]+)">([^<]*)</g)].map((m) => m[1] + ':' + m[2]).join(' ')).join(' | '),
+    'measuring:measuring kind:Surface | measuring:measuring kind:Surface | measuring:measuring kind:Surface',
+  );
+  check('launch: every launch row is built as unmeasured', LAUNCH_ROWS.every((row) => page.buildRow(row).measured === false));
+  check('launch: every launch row is built as a surface', LAUNCH_ROWS.every((row) => page.buildRow(row).kind === 'Surface'));
+
+  // The exact bug, asserted directly: the raw enum reached the public board as
+  // a chip body. No rendered element's text may be one of them.
+  const rendered = launch.board.queryAll(() => true);
+  for (const enumValue of ['tui_interaction', 'repo_indexing', 'native_text_search']) {
+    check(
+      'launch: no rendered element reads as the raw enum ' + enumValue,
+      rendered.every((element) => element.textContent !== enumValue),
+      rendered.filter((element) => element.textContent === enumValue).map((element) => element.toHtml()).join(' '),
+    );
+    check('launch: the markup does not carry the raw enum ' + enumValue, !html.includes(enumValue), html.slice(0, 600));
+  }
 
   check('launch: no rank renders', !html.includes('class="rank"'));
   check('launch: no percentage renders', !html.includes('%'));
@@ -554,7 +647,7 @@ function boardHtml(board) {
   check('launch: no N/A renders', !html.includes('N/A'));
   check('launch: no null renders', !html.includes('null'));
   check('launch: no measured row renders', !html.includes('row-measured'));
-  check('launch: the board note is untouched by the render', true);
+  check('launch: the board note is untouched by the render', shellHtml.includes('id="board-note"') && !html.includes('board-note'));
 }
 
 {
@@ -688,11 +781,19 @@ for (const [name, respond] of [
 }
 
 {
-  const bare = await render([measured({ id: 'm1', title: 'Bare', description: null, summary: null })]);
+  const bare = await render([measured({ id: 'm1', title: 'Bare', summary: null })]);
   const html = boardHtml(bare.board);
-  check('sparse: a row with no description renders no description element', !html.includes('class="desc"'));
-  check('sparse: a row with no surface renders no surface chip', !html.includes('class="chip chip-surface"'));
+  check('sparse: a row with no summary renders no description element', !html.includes('class="desc"'));
+  check('sparse: a row with nothing to chip renders no chip at all', !html.includes('class="chip '));
   check('sparse: nothing undefined is rendered', !/undefined|\[object|NaN/.test(html), html.slice(0, 400));
+}
+
+// The description mechanism was decided on its own merits: `summary` is the
+// column the table has, and a `description` key still wins when one arrives.
+{
+  equal('description: the row description is read from summary', page.buildRow(unmeasured()).description, 'How fast the terminal interface responds to you.');
+  equal('description: a description key still wins', page.buildRow(unmeasured({ description: 'From the fallback key.' })).description, 'From the fallback key.');
+  equal('description: neither key means no description', page.buildRow(unmeasured({ summary: null })).description, '');
 }
 
 {
@@ -710,11 +811,14 @@ for (const [name, respond] of [
 // --- 6. Injection -----------------------------------------------------------
 
 {
+  // Payloads land on the columns the table actually has and the client actually
+  // renders: `id`, `title` and `summary`. `surface` stays a raw enum, which is
+  // the point — it is never rendered, so it is never a sink either.
   const hostile = unmeasured({
     id: '<img src=x onerror=alert(1)>',
     title: '<script>alert(1)</script>',
-    description: '"><svg onload=alert(1)>',
-    surface: '"><b>bold</b>',
+    summary: '"><svg onload=alert(1)><b>bold</b>',
+    surface: 'tui_interaction',
   });
   const { board } = await render([hostile]);
   const html = boardHtml(board);
@@ -723,6 +827,7 @@ for (const [name, respond] of [
   check('injection: an img from the database does not become an element', board.queryAll((e) => e.tagName === 'IMG').length === 0);
   check('injection: a b tag from the database does not become an element', board.queryAll((e) => e.tagName === 'B').length === 0);
   check('injection: the payload survives as text', html.includes('&lt;script&gt;alert(1)&lt;/script&gt;'), html.slice(0, 500));
+  check('injection: a hostile surface is never rendered as text', !html.includes('tui_interaction'), html.slice(0, 500));
   const handlerAttributes = board
     .queryAll(() => true)
     .flatMap((element) => Object.keys(element.attributes))
@@ -809,6 +914,20 @@ for (const [name, respond] of [
   const response = await responder(LAUNCH_ROWS)(page.boardUrl(CONFIG));
   const payloadBytes = Buffer.byteLength(JSON.stringify(await response.json()));
   check('budget: the launch dataset response is at most 10KB', payloadBytes <= 10 * 1024, payloadBytes + ' bytes');
+}
+
+// --- 9. No open items -------------------------------------------------------
+
+{
+  // An open item that reports on every run and blocks nothing is not a check.
+  // `kind` was left out of the select list on a reason that had expired, and the
+  // only record of it was a note in a pull request. So the pattern is now
+  // refused in the source of this file: a `check(name, true)` can never come
+  // back. Anything genuinely unresolved belongs in an issue, not in a check that
+  // cannot fail.
+  const source = await readFile(join(ROOT, 'scripts', 'check-page.mjs'), 'utf8');
+  const openItems = [...source.matchAll(/\bcheck\(\s*(['"`][^'"`]*['"`])\s*,\s*(?:true|false)\s*\)/g)].map((match) => match[1]);
+  check('open items: no check in this file is a condition that cannot fail', openItems.length === 0, JSON.stringify(openItems));
 }
 
 // --- Report -----------------------------------------------------------------

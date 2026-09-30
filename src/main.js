@@ -23,21 +23,37 @@
 
 const TABLE = 'optimizations';
 
-// The select list. Two deliberate omissions.
+// The select list.
+//
+// One rule governs it: a PostgREST select naming a column the table does not
+// have fails the whole read with PGRST204, and the page then shows its failure
+// panel instead of its rows. There is no partial success to reason about, so a
+// name here is a claim about the live schema and has to be true. The live
+// `public.optimizations` columns, in ordinal order, are:
+//
+//   id, title, surface, summary, commit_sha, commit_url, metric, unit,
+//   before_value, after_value, improvement_pct, harness, measured_at,
+//   measured_by, published, created_at, kind
+//
+// Three consequences, and each one is deliberate.
+//
+// `description` is not in the list because no such column exists. The
+// description is stored in `summary`, and `buildRow` reads it from there. The
+// two names were both listed once, and the one that is not a column was enough
+// to break the read on the public URL.
 //
 // `published` is absent because row level security already filters on it. A
 // second filter in the client is one more place to be wrong tomorrow.
 //
-// `kind` is absent because the column does not exist yet on the live table. A
-// PostgREST select naming a column the database does not have fails the whole
-// read with PGRST204, which would put the launch state into the failure panel
-// over a chip nobody asked for. The renderer already handles `kind`, so adding
-// the column to this string is the entire change when the migration lands.
+// `kind` is present. The column exists, every published row carries `Surface`,
+// and spec §7.2 wants that chip on an unmeasured row, which is every row in
+// the launch state. It was left out on the grounds that the column did not
+// exist yet; that reason expired with the migration, and the omission was
+// silent — the column was simply never asked for, so the chip never rendered.
 const SELECT_COLUMNS = [
   'id',
   'title',
   'surface',
-  'description',
   'summary',
   'before_value',
   'after_value',
@@ -48,6 +64,7 @@ const SELECT_COLUMNS = [
   'harness',
   'measured_at',
   'measured_by',
+  'kind',
 ].join(',');
 
 const SHORT_SHA_LENGTH = 7;
@@ -181,6 +198,12 @@ function firstText(a, b) {
  * improvement percentage and all eight evidence values are usable. An
  * improvement that exists without its evidence is deliberately not surfaced,
  * because the point of the page is that a number is never shown unproven.
+ *
+ * `surface` is the raw storage enum, carried as a grouping key. It is never
+ * rendered as text; the display label for it is the row's `title`, which is
+ * the §3.1 copy. `description` prefers a `description` key when one arrives —
+ * the fallback is kept because the mechanism was decided on its own merits —
+ * and reads `summary`, which is the column the table actually has.
  */
 export function buildRow(raw) {
   const source = raw && typeof raw === 'object' ? raw : {};
@@ -323,19 +346,32 @@ function provenance(row) {
   return strip;
 }
 
+/**
+ * The chips for one row.
+ *
+ * Only the kind chip renders. A change needs no chip saying "change", so a row
+ * that is a measured change carries none at all.
+ *
+ * The surface chip is absent, on purpose rather than by omission. Spec §6 and
+ * §7.2 make it the §3.1 surface label and say it renders "only when it is not
+ * identical to the name". The §20 dependency 2 decision is that the display
+ * label is the row's own `title` column: the client carries no surface-to-label
+ * map, because the seed already holds the §3.1 copy and a second copy is a
+ * second thing to drift out of date. A label identical to the name is
+ * identical to `row.name`, so the chip is suppressed on every row by
+ * construction.
+ *
+ * That matters because `row.surface` holds the raw enum — `tui_interaction`,
+ * `repo_indexing`, `native_text_search` — which is a grouping key and never
+ * text. It was once printed as the chip body, which put snake_case storage
+ * values on the public board. `row.surface` is still carried through
+ * `buildRow`; nothing renders it.
+ */
 function chips(row) {
+  if (row.kind !== COPY.chipSurface) return null;
   const group = node('span', 'chips');
-  let any = false;
-  // A change needs no chip saying "change", so only a surface is chipped.
-  if (row.kind === COPY.chipSurface) {
-    group.appendChild(node('span', 'chip chip-kind', COPY.chipSurface));
-    any = true;
-  }
-  if (row.surface !== '' && row.surface !== row.name) {
-    group.appendChild(node('span', 'chip chip-surface', row.surface));
-    any = true;
-  }
-  return any ? group : null;
+  group.appendChild(node('span', 'chip chip-kind', COPY.chipSurface));
+  return group;
 }
 
 function identity(row, slot) {
